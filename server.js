@@ -3,7 +3,6 @@ const axios = require("axios");
 
 const app = express();
 
-// ВАЖНО: принимаем и JSON, и raw body (amoCRM может слать с разным Content-Type)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.text({ type: "text/*" }));
@@ -11,26 +10,34 @@ app.use(express.raw({ type: "*/*" }));
 
 const PORT = process.env.PORT || 3000;
 
-const AMO_DOMAIN = process.env.AMO_DOMAIN;
+const rawDomain = process.env.AMO_DOMAIN || "";
+const AMO_DOMAIN = rawDomain.endsWith(".amocrm.ru")
+  ? rawDomain
+  : `${rawDomain}.amocrm.ru`;
+
 const ACCESS_TOKEN = process.env.AMO_ACCESS_TOKEN;
 
 const TYPE_REQUEST_FIELD_ID = 466253;
 const REJECT_REASON_FIELD_ID = 573457;
-
 const TYPE_TECHNICAL_ENUM_ID = 978137;
 const NDZ_GT_3_ENUM_ID = 976779;
 
-// В продакшене лучше использовать Redis/БД, а не Set в памяти
 const processedLeads = new Set();
 
-// Универсальный парсер тела запроса
 function parseBody(req) {
-  // Если уже распарсилось как JSON
-  if (typeof req.body === "object" && req.body !== null && Object.keys(req.body).length > 0) {
-    return req.body;
+  if (typeof req.body === "object" && req.body !== null && !Buffer.isBuffer(req.body)) {
+    if (Object.keys(req.body).length > 0) {
+      return req.body;
+    }
   }
-  // Если пришёл raw Buffer или строка
-  const raw = typeof req.body === "string" ? req.body : req.body?.toString("utf-8");
+
+  const raw =
+    typeof req.body === "string"
+      ? req.body
+      : Buffer.isBuffer(req.body)
+      ? req.body.toString("utf-8")
+      : "";
+
   if (raw && raw.trim().startsWith("{")) {
     try {
       return JSON.parse(raw);
@@ -38,35 +45,168 @@ function parseBody(req) {
       console.error("JSON parse error:", e.message);
     }
   }
+
+  if (typeof req.body === "object") {
+    if (typeof req.body.data === "string") {
+      try {
+        return JSON.parse(req.body.data);
+      } catch (e) {
+        console.error("JSON parse from data error:", e.message);
+      }
+    }
+    if (Object.keys(req.body).length > 0) {
+      return req.body;
+    }
+  }
+
   return null;
 }
 
-// Извлекаем массив сделок из разных форматов вебхука amoCRM
+// Извлекаем сделки из вебхука (поддержка разных форматов)
 function extractLeads(body) {
   if (!body) return [];
 
-  // Формат 1: массив (новый API / JSON)
-  // {"leads": {"add": [{...}, {...}]}}
+  // Прямой массив сделок
   const leadsArr =
     body?.leads?.status ||
     body?.leads?.update ||
     body?.leads?.add;
 
   if (Array.isArray(leadsArr) && leadsArr.length > 0) {
-    return leadsArr;
+    return leadsArr.map(lead => ({ ...lead, entityType: 'lead' }));
   }
 
-  // Формат 2: объект с числовыми ключами (x-www-form-urlencoded)
-  // {"leads": {"add": {"0": {...}, "1": {...}}}}
   if (typeof leadsArr === "object" && leadsArr !== null) {
-    return Object.values(leadsArr);
+    return Object.values(leadsArr).map(lead => ({ ...lead, entityType: 'lead' }));
   }
 
   return [];
 }
 
+// Извлекаем сущности из вебхука примечаний
+function extractEntitiesFromNotes(body) {
+  const entities = [];
+
+  // Примечания в сделках
+  if (body?.leads?.notes) {
+    const leadsNotes = Array.isArray(body.leads.notes)
+      ? body.leads.notes
+      : Object.values(body.leads.notes);
+    entities.push(...leadsNotes.map(note => ({ ...note, entityType: 'lead' })));
+  }
+
+  // Примечания в контактах
+  if (body?.contacts?.notes) {
+    const contactsNotes = Array.isArray(body.contacts.notes)
+      ? body.contacts.notes
+      : Object.values(body.contacts.notes);
+    entities.push(...contactsNotes.map(note => ({ ...note, entityType: 'contact' })));
+  }
+
+  // Примечания в компаниях
+  if (body?.companies?.notes) {
+    const companiesNotes = Array.isArray(body.companies.notes)
+      ? body.companies.notes
+      : Object.values(body.companies.notes);
+    entities.push(...companiesNotes.map(note => ({ ...note, entityType: 'company' })));
+  }
+
+  // Примечания в покупателях (это тоже leads)
+  if (body?.customers?.notes) {
+    const customersNotes = Array.isArray(body.customers.notes)
+      ? body.customers.notes
+      : Object.values(body.customers.notes);
+    entities.push(...customersNotes.map(note => ({ ...note, entityType: 'lead' })));
+  }
+
+  return entities;
+}
+
+// Получить связь контакта/компании со сделкой
+async function getLinkedLead(entityType, entityId) {
+  try {
+    if (entityType === 'contact') {
+      const res = await axios.get(
+        `https://${AMO_DOMAIN}/api/v4/contacts/${entityId}`,
+        {
+          headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
+          params: { with: 'links' }
+        }
+      );
+      const links = res.data?._embedded?.links || [];
+      const leadLink = links.find(l => l.to_entity_type === 'leads');
+      return leadLink ? leadLink.to_entity_id : null;
+    }
+
+    if (entityType === 'company') {
+      const res = await axios.get(
+        `https://${AMO_DOMAIN}/api/v4/companies/${entityId}`,
+        {
+          headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
+          params: { with: 'links' }
+        }
+      );
+      const links = res.data?._embedded?.links || [];
+      const leadLink = links.find(l => l.to_entity_type === 'leads');
+      return leadLink ? leadLink.to_entity_id : null;
+    }
+  } catch (e) {
+    console.error(`Error getting linked lead for ${entityType} #${entityId}:`, e.message);
+  }
+
+  return null;
+}
+
+async function getAllCallOutNotes(entityType, entityId) {
+  const allNotes = [];
+  let page = 1;
+  let hasMore = true;
+
+  const endpoint = entityType === 'lead' ? 'leads'
+    : entityType === 'contact' ? 'contacts'
+    : entityType === 'company' ? 'companies'
+    : 'leads';
+
+  while (hasMore) {
+    const notesRes = await axios.get(
+      `https://${AMO_DOMAIN}/api/v4/${endpoint}/${entityId}/notes`,
+      {
+        headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
+        params: {
+          limit: 250,
+          page,
+          "filter[note_type]": "call_out"
+        }
+      }
+    );
+
+    const notes = notesRes.data?._embedded?.notes || [];
+    console.log(`  Page ${page}: got ${notes.length} call_out notes`);
+
+    allNotes.push(...notes);
+
+    const lastHref = notesRes.data?._links?.pages?.last?.href;
+    if (lastHref) {
+      try {
+        const lastPage = parseInt(
+          new URL(lastHref).searchParams.get("page") || "1",
+          10
+        );
+        hasMore = page < lastPage;
+      } catch (e) {
+        hasMore = false;
+      }
+    } else {
+      hasMore = false;
+    }
+
+    page++;
+  }
+
+  return allNotes;
+}
+
 app.post("/webhook/amo", async (req, res) => {
-  // ВАЖНО: логируем каждый входящий запрос
   console.log("=== WEBHOOK RECEIVED ===");
   console.log("Headers:", JSON.stringify(req.headers));
   console.log("Raw body type:", typeof req.body);
@@ -75,64 +215,73 @@ app.post("/webhook/amo", async (req, res) => {
     const body = parseBody(req);
     console.log("Parsed body:", JSON.stringify(body, null, 2));
 
-    const leads = extractLeads(body);
-    console.log(`Extracted ${leads.length} leads`);
+    let entitiesToProcess = [];
 
-    if (!leads.length) {
-      console.log("No leads found in webhook, returning 200");
+    // Проверяем, это webhook о примечаниях или о сделках
+    if (body?.leads?.notes || body?.contacts?.notes || body?.companies?.notes || body?.customers?.notes) {
+      // Вебхук о примечаниях
+      entitiesToProcess = extractEntitiesFromNotes(body);
+      console.log(`Extracted ${entitiesToProcess.length} note entities`);
+    } else {
+      // Вебхук о сделках
+      const leads = extractLeads(body);
+      console.log(`Extracted ${leads.length} leads`);
+      entitiesToProcess = leads;
+    }
+
+    if (!entitiesToProcess.length) {
+      console.log("No entities found in webhook, returning 200");
       return res.sendStatus(200);
     }
 
-    for (const lead of leads) {
-      const leadId = lead.id || lead?.lead_id;
-      console.log(`\n--- Processing lead #${leadId} ---`);
+    for (const entity of entitiesToProcess) {
+      let leadId = null;
+      let entityType = entity.entityType || 'lead';
+      const entityId = Number(entity.id || entity.entity_id);
 
-      if (!leadId) {
-        console.log("No lead ID, skipping");
+      console.log(`\n--- Processing ${entityType} #${entityId} ---`);
+
+      // Определяем, к какой сделке относится сущность
+      if (entityType === 'lead') {
+        leadId = entityId;
+      } else if (entityType === 'contact' || entityType === 'company') {
+        leadId = await getLinkedLead(entityType, entityId);
+        if (!leadId) {
+          console.log(`No linked lead found for ${entityType} #${entityId}, skipping`);
+          continue;
+        }
+        console.log(`Linked to lead #${leadId}`);
+      }
+
+      if (!leadId || isNaN(leadId)) {
+        console.log("No valid lead ID, skipping");
         continue;
       }
+
       if (processedLeads.has(leadId)) {
         console.log(`Lead #${leadId} already processed, skipping`);
         continue;
       }
 
-      // Получаем ВСЕ примечания с пагинацией
+      // Получаем все исходящие звонки из сделки
       let allNotes = [];
-      let page = 1;
-      let hasMore = true;
-
-      while (hasMore) {
-        const notesRes = await axios.get(
-          `https://${AMO_DOMAIN}/api/v4/leads/${leadId}/notes`,
-          {
-            headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
-            params: {
-              limit: 250,
-              page,
-              "filter[note_type]": "call_out" // сразу фильтруем только исходящие звонки
-            }
-          }
+      try {
+        allNotes = await getAllCallOutNotes('lead', leadId);
+      } catch (notesErr) {
+        console.error(
+          `Error fetching notes for lead #${leadId}:`,
+          notesErr.response?.data || notesErr.message
         );
-
-        const notes = notesRes.data?._embedded?.notes || [];
-        console.log(`Page ${page}: got ${notes.length} call_out notes`);
-
-        allNotes = allNotes.concat(notes);
-
-        // Проверяем, есть ли ещё страницы
-        const totalPages = notesRes.data?._links?.pages?.last?.href
-          ? parseInt(new URL(notesRes.data._links.pages.last.href).searchParams.get("page"))
-          : page;
-        hasMore = page < totalPages;
-        page++;
+        continue;
       }
 
       console.log(`Total call_out notes for lead #${leadId}: ${allNotes.length}`);
 
-      // Считаем короткие звонки (0-30 сек)
       let shortCalls = 0;
       for (const note of allNotes) {
-        const duration = Number(note.params?.duration || 0);
+        const duration = Number(
+          note.params?.duration || note.params?.call_duration || 0
+        );
         console.log(`  Note #${note.id}: duration=${duration}s`);
         if (duration <= 30) {
           shortCalls++;
@@ -165,7 +314,10 @@ app.post("/webhook/amo", async (req, res) => {
           console.log(`PATCH response status: ${patchRes.status}`);
           processedLeads.add(leadId);
         } catch (patchErr) {
-          console.error(`PATCH error for lead #${leadId}:`, patchErr.response?.data || patchErr.message);
+          console.error(
+            `PATCH error for lead #${leadId}:`,
+            patchErr.response?.data || patchErr.message
+          );
         }
       } else {
         console.log(`Not enough short calls for lead #${leadId}, skipping`);
@@ -185,4 +337,6 @@ app.get("/", (req, res) => {
 
 app.listen(PORT, () => {
   console.log("Server started on port", PORT);
+  console.log("Using AMO_DOMAIN:", AMO_DOMAIN);
+  console.log("ACCESS_TOKEN is set:", !!ACCESS_TOKEN);
 });
