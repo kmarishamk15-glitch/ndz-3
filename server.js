@@ -24,6 +24,8 @@ const NDZ_GT_3_ENUM_ID = 976779;
 
 const processedLeads = new Set();
 
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 function parseBody(req) {
   if (typeof req.body === "object" && req.body !== null && !Buffer.isBuffer(req.body)) {
     if (Object.keys(req.body).length > 0) {
@@ -62,11 +64,9 @@ function parseBody(req) {
   return null;
 }
 
-// Извлекаем сделки из вебхука (поддержка разных форматов)
 function extractLeads(body) {
   if (!body) return [];
 
-  // Прямой массив сделок
   const leadsArr =
     body?.leads?.status ||
     body?.leads?.update ||
@@ -83,11 +83,9 @@ function extractLeads(body) {
   return [];
 }
 
-// Извлекаем сущности из вебхука примечаний
 function extractEntitiesFromNotes(body) {
   const entities = [];
 
-  // Примечания в сделках
   if (body?.leads?.notes) {
     const leadsNotes = Array.isArray(body.leads.notes)
       ? body.leads.notes
@@ -95,7 +93,6 @@ function extractEntitiesFromNotes(body) {
     entities.push(...leadsNotes.map(note => ({ ...note, entityType: 'lead' })));
   }
 
-  // Примечания в контактах
   if (body?.contacts?.notes) {
     const contactsNotes = Array.isArray(body.contacts.notes)
       ? body.contacts.notes
@@ -103,7 +100,6 @@ function extractEntitiesFromNotes(body) {
     entities.push(...contactsNotes.map(note => ({ ...note, entityType: 'contact' })));
   }
 
-  // Примечания в компаниях
   if (body?.companies?.notes) {
     const companiesNotes = Array.isArray(body.companies.notes)
       ? body.companies.notes
@@ -111,7 +107,6 @@ function extractEntitiesFromNotes(body) {
     entities.push(...companiesNotes.map(note => ({ ...note, entityType: 'company' })));
   }
 
-  // Примечания в покупателях (это тоже leads)
   if (body?.customers?.notes) {
     const customersNotes = Array.isArray(body.customers.notes)
       ? body.customers.notes
@@ -122,7 +117,6 @@ function extractEntitiesFromNotes(body) {
   return entities;
 }
 
-// Получить связь контакта/компании со сделкой
 async function getLinkedLead(entityType, entityId) {
   try {
     if (entityType === 'contact') {
@@ -151,7 +145,7 @@ async function getLinkedLead(entityType, entityId) {
       return leadLink ? leadLink.to_entity_id : null;
     }
   } catch (e) {
-    console.error(`Error getting linked lead for ${entityType} #${entityId}:`, e.message);
+    console.error(`Error getting linked lead:`, e.message);
   }
 
   return null;
@@ -174,16 +168,16 @@ async function getAllCallOutNotes(entityType, entityId) {
         headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
         params: {
           limit: 250,
-          page,
-          "filter[note_type]": "call_out"
+          page
         }
       }
     );
 
     const notes = notesRes.data?._embedded?.notes || [];
-    console.log(`  Page ${page}: got ${notes.length} call_out notes`);
+    console.log(`  Page ${page}: got ${notes.length} notes`);
 
-    allNotes.push(...notes);
+    const callOutNotes = notes.filter(n => n.note_type === 'call_out');
+    allNotes.push(...callOutNotes);
 
     const lastHref = notesRes.data?._links?.pages?.last?.href;
     if (lastHref) {
@@ -208,49 +202,41 @@ async function getAllCallOutNotes(entityType, entityId) {
 
 app.post("/webhook/amo", async (req, res) => {
   console.log("=== WEBHOOK RECEIVED ===");
-  console.log("Headers:", JSON.stringify(req.headers));
-  console.log("Raw body type:", typeof req.body);
 
   try {
     const body = parseBody(req);
-    console.log("Parsed body:", JSON.stringify(body, null, 2));
 
     let entitiesToProcess = [];
 
-    // Проверяем, это webhook о примечаниях или о сделках
     if (body?.leads?.notes || body?.contacts?.notes || body?.companies?.notes || body?.customers?.notes) {
-      // Вебхук о примечаниях
       entitiesToProcess = extractEntitiesFromNotes(body);
       console.log(`Extracted ${entitiesToProcess.length} note entities`);
     } else {
-      // Вебхук о сделках
       const leads = extractLeads(body);
       console.log(`Extracted ${leads.length} leads`);
       entitiesToProcess = leads;
     }
 
     if (!entitiesToProcess.length) {
-      console.log("No entities found in webhook, returning 200");
+      console.log("No entities found, returning 200");
       return res.sendStatus(200);
     }
 
     for (const entity of entitiesToProcess) {
       let leadId = null;
-      let entityType = entity.entityType || 'lead';
+      const entityType = entity.entityType || 'lead';
       const entityId = Number(entity.id || entity.entity_id);
 
       console.log(`\n--- Processing ${entityType} #${entityId} ---`);
 
-      // Определяем, к какой сделке относится сущность
       if (entityType === 'lead') {
         leadId = entityId;
       } else if (entityType === 'contact' || entityType === 'company') {
         leadId = await getLinkedLead(entityType, entityId);
         if (!leadId) {
-          console.log(`No linked lead found for ${entityType} #${entityId}, skipping`);
+          console.log(`No linked lead found, skipping`);
           continue;
         }
-        console.log(`Linked to lead #${leadId}`);
       }
 
       if (!leadId || isNaN(leadId)) {
@@ -263,15 +249,14 @@ app.post("/webhook/amo", async (req, res) => {
         continue;
       }
 
-      // Получаем все исходящие звонки из сделки
+      console.log('Waiting 3 seconds for note to be saved...');
+      await sleep(3000);
+
       let allNotes = [];
       try {
         allNotes = await getAllCallOutNotes('lead', leadId);
       } catch (notesErr) {
-        console.error(
-          `Error fetching notes for lead #${leadId}:`,
-          notesErr.response?.data || notesErr.message
-        );
+        console.error(`Error fetching notes:`, notesErr.response?.data || notesErr.message);
         continue;
       }
 
@@ -279,10 +264,8 @@ app.post("/webhook/amo", async (req, res) => {
 
       let shortCalls = 0;
       for (const note of allNotes) {
-        const duration = Number(
-          note.params?.duration || note.params?.call_duration || 0
-        );
-        console.log(`  Note #${note.id}: duration=${duration}s`);
+        const duration = Number(note.params?.duration || note.params?.call_duration || 0);
+        console.log(`  Call duration: ${duration}s`);
         if (duration <= 30) {
           shortCalls++;
         }
@@ -311,16 +294,13 @@ app.post("/webhook/amo", async (req, res) => {
               headers: { Authorization: `Bearer ${ACCESS_TOKEN}` }
             }
           );
-          console.log(`PATCH response status: ${patchRes.status}`);
+          console.log(`PATCH success: ${patchRes.status}`);
           processedLeads.add(leadId);
         } catch (patchErr) {
-          console.error(
-            `PATCH error for lead #${leadId}:`,
-            patchErr.response?.data || patchErr.message
-          );
+          console.error(`PATCH error:`, patchErr.response?.data || patchErr.message);
         }
       } else {
-        console.log(`Not enough short calls for lead #${leadId}, skipping`);
+        console.log(`Not enough short calls, skipping`);
       }
     }
 
