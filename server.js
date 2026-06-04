@@ -27,22 +27,46 @@ const processedLeads = new Set();
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 function parseBody(req) {
+  console.log(`  [parseBody] type: ${typeof req.body}, isBuffer: ${Buffer.isBuffer(req.body)}`);
+  
   if (typeof req.body === "object" && req.body !== null && !Buffer.isBuffer(req.body)) {
-    if (Object.keys(req.body).length > 0) return req.body;
+    console.log(`  [parseBody] keys: ${Object.keys(req.body).length}`);
+    if (Object.keys(req.body).length > 0) {
+      console.log(`  [parseBody] returning parsed object`);
+      return req.body;
+    }
   }
 
   const raw = typeof req.body === "string" ? req.body : Buffer.isBuffer(req.body) ? req.body.toString("utf-8") : "";
+  console.log(`  [parseBody] raw length: ${raw.length}`);
+  
   if (raw && raw.trim().startsWith("{")) {
-    try { return JSON.parse(raw); } catch (e) { console.error("JSON parse error:", e.message); }
+    try { 
+      const parsed = JSON.parse(raw);
+      console.log(`  [parseBody] parsed from raw JSON`);
+      return parsed;
+    } catch (e) { 
+      console.error("JSON parse error:", e.message); 
+    }
   }
 
   if (typeof req.body === "object") {
     if (typeof req.body.data === "string") {
-      try { return JSON.parse(req.body.data); } catch (e) { console.error("JSON parse from data error:", e.message); }
+      try { 
+        const parsed = JSON.parse(req.body.data);
+        console.log(`  [parseBody] parsed from data field`);
+        return parsed;
+      } catch (e) { 
+        console.error("JSON parse from data error:", e.message); 
+      }
     }
-    if (Object.keys(req.body).length > 0) return req.body;
+    if (Object.keys(req.body).length > 0) {
+      console.log(`  [parseBody] returning body object`);
+      return req.body;
+    }
   }
 
+  console.log(`  [parseBody] returning null`);
   return null;
 }
 
@@ -105,8 +129,6 @@ async function getAllCallOutNotes(entityType, entityId) {
     });
 
     const notes = notesRes.data?._embedded?.notes || [];
-
-    // ВАЖНО: берем ТОЛЬКО исходящие звонки
     const callNotes = notes.filter(n => n.note_type === 'call_out');
     allNotes.push(...callNotes);
 
@@ -127,19 +149,34 @@ async function getAllCallOutNotes(entityType, entityId) {
 
 app.post("/webhook/amo", async (req, res) => {
   console.log("=== WEBHOOK RECEIVED ===");
+  console.log(`  Content-Type: ${req.headers['content-type']}`);
+  console.log(`  Body length: ${req.headers['content-length']}`);
 
   try {
     const body = parseBody(req);
+    console.log(`  [main] body is null: ${body === null}`);
+    
+    if (body === null) {
+      console.log(`  [main] body is null, returning 200`);
+      return res.sendStatus(200);
+    }
+
     let entitiesToProcess = [];
 
-    if (body?.leads?.notes || body?.contacts?.notes || body?.companies?.notes || body?.customers?.notes) {
+    const hasNotes = body?.leads?.notes || body?.contacts?.notes || body?.companies?.notes || body?.customers?.notes;
+    console.log(`  [main] hasNotes: ${!!hasNotes}`);
+
+    if (hasNotes) {
       entitiesToProcess = extractEntitiesFromNotes(body);
+      console.log(`  [main] extracted ${entitiesToProcess.length} note entities`);
     } else {
       const leads = extractLeads(body);
+      console.log(`  [main] extracted ${leads.length} leads`);
       entitiesToProcess = leads;
     }
 
     if (!entitiesToProcess.length) {
+      console.log(`  [main] no entities, returning 200`);
       return res.sendStatus(200);
     }
 
