@@ -80,33 +80,64 @@ function extractLeads(body) {
 
 function extractEntitiesFromNotes(body) {
   const entities = [];
-  if (body?.leads?.notes) {
-    const notes = Array.isArray(body.leads.notes) ? body.leads.notes : Object.values(body.leads.notes);
-    entities.push(...notes.map(note => ({ ...note, entityType: 'lead' })));
-  }
-  if (body?.contacts?.notes) {
-    const notes = Array.isArray(body.contacts.notes) ? body.contacts.notes : Object.values(body.contacts.notes);
-    entities.push(...notes.map(note => ({ ...note, entityType: 'contact' })));
-  }
-  if (body?.companies?.notes) {
-    const notes = Array.isArray(body.companies.notes) ? body.companies.notes : Object.values(body.companies.notes);
-    entities.push(...notes.map(note => ({ ...note, entityType: 'company' })));
-  }
-  if (body?.customers?.notes) {
-    const notes = Array.isArray(body.customers.notes) ? body.customers.notes : Object.values(body.customers.notes);
-    entities.push(...notes.map(note => ({ ...note, entityType: 'lead' })));
-  }
-  return entities;
-    if (body?.leads?.note) {
+
+  // webhook amoCRM: leads.note
+  if (body?.leads?.note) {
     const notes = Array.isArray(body.leads.note)
       ? body.leads.note
       : Object.values(body.leads.note);
-  
-    return notes.map(item => ({
-      id: Number(item.note.element_id),
-      entityType: "lead"
-    }));
+
+    console.log(`Found ${notes.length} lead notes`);
+
+    entities.push(
+      ...notes.map(item => ({
+        id: Number(item.note.element_id),
+        entityType: "lead"
+      }))
+    );
   }
+
+  // старые варианты
+  if (body?.leads?.notes) {
+    const notes = Array.isArray(body.leads.notes)
+      ? body.leads.notes
+      : Object.values(body.leads.notes);
+
+    entities.push(
+      ...notes.map(note => ({
+        ...note,
+        entityType: "lead"
+      }))
+    );
+  }
+
+  if (body?.contacts?.notes) {
+    const notes = Array.isArray(body.contacts.notes)
+      ? body.contacts.notes
+      : Object.values(body.contacts.notes);
+
+    entities.push(
+      ...notes.map(note => ({
+        ...note,
+        entityType: "contact"
+      }))
+    );
+  }
+
+  if (body?.companies?.notes) {
+    const notes = Array.isArray(body.companies.notes)
+      ? body.companies.notes
+      : Object.values(body.companies.notes);
+
+    entities.push(
+      ...notes.map(note => ({
+        ...note,
+        entityType: "company"
+      }))
+    );
+  }
+
+  return entities;
 }
 
 async function getLinkedLead(entityType, entityId) {
