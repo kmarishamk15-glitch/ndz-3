@@ -218,23 +218,58 @@ app.post("/webhook/amo", async (req, res) => {
 
       let shortCalls = 0;
       let hasLongCall = false;
-
+      
+      console.log("");
+      console.log(`========== LEAD ${leadId} ==========`);
+      
       for (const note of allNotes) {
-        const duration = Number(note.params?.duration || note.params?.call_duration || 0);
+        const duration = Number(
+          note.params?.duration ||
+          note.params?.call_duration ||
+          0
+        );
+      
+        const callDate = note.created_at
+          ? new Date(note.created_at * 1000).toISOString()
+          : "unknown";
+      
+        console.log(
+          `Call #${note.id} | Duration: ${duration}s | Date: ${callDate}`
+        );
+      
         if (duration <= 30) {
           shortCalls++;
+          console.log("  -> SHORT CALL");
         } else {
           hasLongCall = true;
+          console.log("  -> LONG CALL (>30s)");
         }
       }
-
-      console.log(`Short outgoing calls (<=30s): ${shortCalls}`);
-      console.log(`Has long outgoing call (>30s): ${hasLongCall}`);
-
+      
+      console.log("--------------------------------");
+      console.log(`Lead ID: ${leadId}`);
+      console.log(`Total outgoing calls: ${allNotes.length}`);
+      console.log(`Short calls (<=30s): ${shortCalls}`);
+      console.log(`Has long call (>30s): ${hasLongCall}`);
+      console.log("--------------------------------");
+      
       if (hasLongCall) {
-        console.log(`Found long outgoing call in lead #${leadId}, skipping`);
+        console.log(
+          `SKIP LEAD ${leadId}: found at least one outgoing call longer than 30 seconds`
+        );
         continue;
       }
+    
+    if (shortCalls < 3) {
+      console.log(
+        `SKIP LEAD ${leadId}: only ${shortCalls} short calls found`
+      );
+      continue;
+    }
+    
+    console.log(
+      `UPDATE LEAD ${leadId}: setting NDZ > 3`
+    );
 
       if (shortCalls >= 3) {
         console.log(`>>> Setting fields for lead #${leadId}`);
