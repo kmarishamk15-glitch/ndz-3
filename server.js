@@ -97,6 +97,16 @@ function extractEntitiesFromNotes(body) {
     entities.push(...notes.map(note => ({ ...note, entityType: 'lead' })));
   }
   return entities;
+    if (body?.leads?.note) {
+    const notes = Array.isArray(body.leads.note)
+      ? body.leads.note
+      : Object.values(body.leads.note);
+  
+    return notes.map(item => ({
+      id: Number(item.note.element_id),
+      entityType: "lead"
+    }));
+  }
 }
 
 async function getLinkedLead(entityType, entityId) {
@@ -166,7 +176,12 @@ app.post("/webhook/amo", async (req, res) => {
 
     let entitiesToProcess = [];
 
-    const hasNotes = body?.leads?.notes || body?.contacts?.notes || body?.companies?.notes || body?.customers?.notes;
+    const hasNotes =
+      body?.leads?.note ||
+      body?.leads?.notes ||
+      body?.contacts?.notes ||
+      body?.companies?.notes ||
+      body?.customers?.notes;
     console.log(`  [main] hasNotes: ${!!hasNotes}`);
 
     if (hasNotes) {
@@ -188,7 +203,7 @@ app.post("/webhook/amo", async (req, res) => {
       const entityType = entity.entityType || 'lead';
       const entityId = Number(entity.id || entity.entity_id);
 
-      console.log(`\n--- Processing ${entityType} #${entityId} ---`);
+      console.log(`Lead ID from webhook: ${entityId}`);
 
       if (entityType === 'lead') {
         leadId = entityId;
