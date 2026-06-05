@@ -154,6 +154,9 @@ app.post("/webhook/amo", async (req, res) => {
 
   try {
     const body = parseBody(req);
+    console.log("========== BODY ==========");
+    console.log(JSON.stringify(body, null, 2));
+    console.log("==========================");
     console.log(`  [main] body is null: ${body === null}`);
     
     if (body === null) {
