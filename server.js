@@ -19,8 +19,16 @@ const ACCESS_TOKEN = process.env.AMO_ACCESS_TOKEN;
 
 const TYPE_REQUEST_FIELD_ID = 466253;
 const REJECT_REASON_FIELD_ID = 573457;
-const TYPE_TECHNICAL_ENUM_ID = 978137;
+
+const TYPE_TECHNICAL_ENUM_ID = 978137; // Нецелевой/техника
+const TYPE_SERVICE_ENUM_ID = 938315;   // Нецелевой/услуги
+
 const NDZ_GT_3_ENUM_ID = 976779;
+
+const SERVICE_MANAGERS = [
+  9437934, // Максим Лосев
+  8323069  // Никита Золотов
+];
 
 const processedLeads = new Set();
 
@@ -319,14 +327,56 @@ app.post("/webhook/amo", async (req, res) => {
     console.log(
       `UPDATE LEAD ${leadId}: setting NDZ > 3`
     );
+      const leadRes = await axios.get(
+        `https://${AMO_DOMAIN}/api/v4/leads/${leadId}`,
+        {
+          headers: {
+            Authorization: `Bearer ${ACCESS_TOKEN}`
+          }
+        }
+      );
+      
+      const responsibleUserId = leadRes.data.responsible_user_id;
+      
+      console.log(
+        `Lead ${leadId} responsible_user_id: ${responsibleUserId}`
+      );
+      
+      let typeRequestEnumId = TYPE_TECHNICAL_ENUM_ID;
+      
+      if (SERVICE_MANAGERS.includes(responsibleUserId)) {
+        typeRequestEnumId = TYPE_SERVICE_ENUM_ID;
+      
+        console.log(
+          `Lead ${leadId}: SERVICE manager`
+        );
+      } else {
+        console.log(
+          `Lead ${leadId}: TECHNICAL manager`
+        );
+      }
 
       if (shortCalls >= 3) {
         console.log(`>>> Setting fields for lead #${leadId}`);
         try {
           const patchRes = await axios.patch(`https://${AMO_DOMAIN}/api/v4/leads/${leadId}`, {
             custom_fields_values: [
-              { field_id: TYPE_REQUEST_FIELD_ID, values: [{ enum_id: TYPE_TECHNICAL_ENUM_ID }] },
-              { field_id: REJECT_REASON_FIELD_ID, values: [{ enum_id: NDZ_GT_3_ENUM_ID }] }
+              {
+                field_id: TYPE_REQUEST_FIELD_ID,
+                values: [
+                  {
+                    enum_id: typeRequestEnumId
+                  }
+                ]
+              },
+              {
+                field_id: REJECT_REASON_FIELD_ID,
+                values: [
+                  {
+                    enum_id: NDZ_GT_3_ENUM_ID
+                  }
+                ]
+              }
             ]
           }, { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } });
           
